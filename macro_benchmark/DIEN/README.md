@@ -27,6 +27,9 @@ When you see the files below, you can do the next work.
 ## train model
 ```
 python train.py train [model name] 
+
+run DIEN on CPU
+python ./script/train.py --hardware=CPU --mode=train --model=DIEN
 ```
 The model blelow had been supported: 
 - DNN 
