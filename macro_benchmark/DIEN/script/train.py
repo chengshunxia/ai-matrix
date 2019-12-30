@@ -8,26 +8,14 @@ import sys
 from utils import *
 
 import argparse
-import os
-
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", type=str, default='train', help="mode, train or test")
 parser.add_argument("--model", type=str, default='DIEN', help="model")
 parser.add_argument("--seed", type=int, default=3, help="seed value")
-parser.add_argument("--batch_size", type=int, default=32, help="batch size")
+parser.add_argument("--batch_size", type=int, default=128, help="batch size")
 parser.add_argument("--data_type", type=str, default='FP32', help="data type: FP32 or FP16")
 parser.add_argument("--num_accelerators", type=int, default=1, help="number of accelerators used for training")
-parser.add_argument("--hardware", type=str, default='IPU', help='CPU or IPU')
-parser.add_argument("--maxlen", type=int, default=100, help='sequence max length')
 args = parser.parse_args()
-
-if (args.hardware == 'IPU'):
-    from tensorflow.python.ipu import utils
-    from tensorflow.python.ipu import ipu_compiler
-    from tensorflow.python.ipu.scopes import ipu_scope
-    # from gc_profile import save_tf_report
-    from tensorflow.compiler.plugin.poplar.ops import gen_ipu_ops
-
 
 EMBEDDING_DIM = 18
 HIDDEN_SIZE = 18 * 2
@@ -35,12 +23,6 @@ ATTENTION_SIZE = 18 * 2
 best_auc = 0.0
 
 TOTAL_TRAIN_SIZE = 512000
-
-PROFILE = False
-NUID = 543060
-NMID = 367983
-NCAT = 1601
-
 
 def prepare_data(input, target, maxlen = None, return_neg = False):
     # x: a list of sentences
@@ -64,24 +46,11 @@ def prepare_data(input, target, maxlen = None, return_neg = False):
                 new_noclk_seqs_cat.append(inp[6][l_x - maxlen:])
                 new_lengths_x.append(maxlen)
             else:
-                list_1 = [0] * (maxlen - len(inp[3]))
-                new_seqs_mid.append(inp[3] + list_1)
-
-                list_2 = [0] * (maxlen - len(inp[4]))
-                new_seqs_cat.append(inp[4] + list_2)
-
-                list_3 = []
-                for i in range(maxlen - len(inp[5])):
-                    list_3.append([0, 0, 0, 0, 0])
-                new_noclk_seqs_mid.append(inp[5] + list_3)
-
-                list_4 = []
-                for i in range(maxlen - len(inp[6])):
-                    list_4.append([0, 0, 0, 0, 0])
-                new_noclk_seqs_cat.append(inp[6] + list_4)
-
-                new_lengths_x.append(maxlen)
-
+                new_seqs_mid.append(inp[3])
+                new_seqs_cat.append(inp[4])
+                new_noclk_seqs_mid.append(inp[5])
+                new_noclk_seqs_cat.append(inp[6])
+                new_lengths_x.append(l_x)
         lengths_x = new_lengths_x
         seqs_mid = new_seqs_mid
         seqs_cat = new_seqs_cat
@@ -95,18 +64,10 @@ def prepare_data(input, target, maxlen = None, return_neg = False):
     maxlen_x = numpy.max(lengths_x)
     neg_samples = len(noclk_seqs_mid[0][0])
 
-    if (args.hardware == 'CPU'):
-        mid_his = numpy.zeros((n_samples, maxlen_x)).astype('int64')
-        cat_his = numpy.zeros((n_samples, maxlen_x)).astype('int64')
-        noclk_mid_his = numpy.zeros((n_samples, maxlen_x, neg_samples)).astype('int64')
-        noclk_cat_his = numpy.zeros((n_samples, maxlen_x, neg_samples)).astype('int64')
-
-    if (args.hardware == 'IPU'):
-        mid_his = numpy.zeros((n_samples, maxlen_x)).astype('int32')
-        cat_his = numpy.zeros((n_samples, maxlen_x)).astype('int32')
-        noclk_mid_his = numpy.zeros((n_samples, maxlen_x, neg_samples)).astype('int32')
-        noclk_cat_his = numpy.zeros((n_samples, maxlen_x, neg_samples)).astype('int32')
-
+    mid_his = numpy.zeros((n_samples, maxlen_x)).astype('int64')
+    cat_his = numpy.zeros((n_samples, maxlen_x)).astype('int64')
+    noclk_mid_his = numpy.zeros((n_samples, maxlen_x, neg_samples)).astype('int64')
+    noclk_cat_his = numpy.zeros((n_samples, maxlen_x, neg_samples)).astype('int64')
     if args.data_type == 'FP32':
         data_type = 'float32'
     elif args.data_type == 'FP16':
@@ -131,7 +92,6 @@ def prepare_data(input, target, maxlen = None, return_neg = False):
     else:
         return uids, mids, cats, mid_his, cat_his, mid_mask, numpy.array(target), numpy.array(lengths_x)
 
-
 def eval(sess, test_data, model, model_path):
     loss_sum = 0.
     accuracy_sum = 0.
@@ -155,7 +115,7 @@ def eval(sess, test_data, model, model_path):
         accuracy_sum += acc
         prob_1 = prob[:, 0].tolist()
         target_1 = target[:, 0].tolist()
-        for p, t in zip(prob_1, target_1):
+        for p ,t in zip(prob_1, target_1):
             stored_arr.append([p, t])
         # print("nums: ", nums)
         # break
@@ -170,84 +130,60 @@ def eval(sess, test_data, model, model_path):
             model.save(sess, model_path)
     return test_auc, loss_sum, accuracy_sum, aux_loss_sum, eval_time, nums
 
-
 def train(
         train_file = "local_train_splitByUser",
         test_file = "local_test_splitByUser",
         uid_voc = "uid_voc.pkl",
         mid_voc = "mid_voc.pkl",
         cat_voc = "cat_voc.pkl",
-        batch_size = 32,
+        batch_size = 128,
         maxlen = 100,
         test_iter = 100,
         save_iter = 100,
         model_type = 'DNN',
         data_type = 'FP32',
-        seed = 2,
+	seed = 2,
 ):
     print("batch_size: ", batch_size)
     print("model: ", model_type)
     model_path = "dnn_save_path/ckpt_noshuff" + model_type + str(seed)
     best_model_path = "dnn_best_model/ckpt_noshuff" + model_type + str(seed)
-
-    if model_type == 'DNN':
-        model = Model_DNN(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
-    elif model_type == 'PNN':
-        model = Model_PNN(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
-    elif model_type == 'Wide':
-        model = Model_WideDeep(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
-    elif model_type == 'DIN':
-        model = Model_DIN(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, args, data_type)
-    elif model_type == 'DIN-V2-gru-att-gru':
-        model = Model_DIN_V2_Gru_att_Gru(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
-    elif model_type == 'DIN-V2-gru-gru-att':
-        model = Model_DIN_V2_Gru_Gru_att(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
-    elif model_type == 'DIN-V2-gru-qa-attGru':
-        model = Model_DIN_V2_Gru_QA_attGru(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
-    elif model_type == 'DIN-V2-gru-vec-attGru':
-        model = Model_DIN_V2_Gru_Vec_attGru(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
-    elif model_type == 'DIEN':
-        model = Model_DIN_V2_Gru_Vec_attGru_Neg(NUID, NMID, NCAT, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, args, data_type)
-    else:
-        print ("Invalid model_type : %s", model_type)
-        return
-
-    if (args.hardware == 'CPU'):
-        model.build_input()
-        model.build_embedding()
-        model.build_graph()
-    if (args.hardware == 'IPU'):
-        with ipu_scope('/device:IPU:0'):
-            model.build_input()
-            batch = ipu_compiler.compile(model.build_train, [])
-
-    # gpu_options = tf.GPUOptions(allow_growth=True)
-    # with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
-    with tf.Session(config=tf.ConfigProto(log_device_placement=True)) as sess:
+    gpu_options = tf.GPUOptions(allow_growth=True)
+    with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
         train_data = DataIterator(train_file, uid_voc, mid_voc, cat_voc, batch_size, maxlen, shuffle_each_epoch=False)
-        # test_data = DataIterator(test_file, uid_voc, mid_voc, cat_voc, batch_size, maxlen)
-        # n_uid, n_mid, n_cat = train_data.get_n()
-
+        test_data = DataIterator(test_file, uid_voc, mid_voc, cat_voc, batch_size, maxlen)
+        n_uid, n_mid, n_cat = train_data.get_n()
+        if model_type == 'DNN':
+            model = Model_DNN(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
+        elif model_type == 'PNN':
+            model = Model_PNN(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
+        elif model_type == 'Wide':
+            model = Model_WideDeep(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
+        elif model_type == 'DIN':
+            model = Model_DIN(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
+        elif model_type == 'DIN-V2-gru-att-gru':
+            model = Model_DIN_V2_Gru_att_Gru(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
+        elif model_type == 'DIN-V2-gru-gru-att':
+            model = Model_DIN_V2_Gru_Gru_att(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
+        elif model_type == 'DIN-V2-gru-qa-attGru':
+            model = Model_DIN_V2_Gru_QA_attGru(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
+        elif model_type == 'DIN-V2-gru-vec-attGru':
+            model = Model_DIN_V2_Gru_Vec_attGru(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
+        elif model_type == 'DIEN':
+            model = Model_DIN_V2_Gru_Vec_attGru_Neg(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE, data_type, True)
+        else:
+            print ("Invalid model_type : %s", model_type)
+            return
         # for var in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES):
         #     print("global variable dtype: ", var.dtype)
         #     if var.dtype == 'float32_ref':
         #         print("global variable: ", var)
         # model = Model_DNN(n_uid, n_mid, n_cat, EMBEDDING_DIM, HIDDEN_SIZE, ATTENTION_SIZE)
-
-        if (args.hardware == 'IPU'):
-            ipu_options = utils.create_ipu_config(profiling=True, profile_execution=True)
-            ipu_options = utils.auto_select_ipus(ipu_options, [1])
-
-            utils.configure_ipu_system(ipu_options)
         sess.run(tf.global_variables_initializer())
-        # sess.run(tf.local_variables_initializer())
-        # sys.stdout.flush()
-        # print('                                                                                      test_auc: %.4f ---- test_loss: %.4f ---- test_accuracy: %.4f ---- test_aux_loss: %.4f ---- eval_time: %.3f ---- num_iters: %d' % eval(sess, test_data, model, best_model_path))
-        # sys.stdout.flush()
-
-        # if (PROFILE==True):
-        #     with tf.device('cpu'):
-        #         report = gen_ipu_ops.ipu_event_trace()
+        sess.run(tf.local_variables_initializer())
+        sys.stdout.flush()
+        print('                                                                                      test_auc: %.4f ---- test_loss: %.4f ---- test_accuracy: %.4f ---- test_aux_loss: %.4f ---- eval_time: %.3f ---- num_iters: %d' % eval(sess, test_data, model, best_model_path))
+        sys.stdout.flush()
 
         iter = 0
         lr = 0.001
@@ -260,23 +196,7 @@ def train(
             for src, tgt in train_data:
                 uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, noclk_mids, noclk_cats = prepare_data(src, tgt, maxlen, return_neg=True)
                 start_time = time.time()
-                # loss, acc, aux_loss = model.train(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, lr, noclk_mids, noclk_cats])
-                if (args.hardware == 'CPU'):
-                    loss, acc, aux_loss = model.train(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, lr, noclk_mids, noclk_cats])
-                if (args.hardware == 'IPU'):
-                    loss, acc, aux_loss = sess.run(batch, feed_dict = {
-                        model.uid_batch_ph: uids,
-                        model.mid_batch_ph: mids,
-                        model.cat_batch_ph: cats,
-                        model.mid_his_batch_ph: mid_his,
-                        model.cat_his_batch_ph: cat_his,
-                        model.mask: mid_mask,
-                        model.target_ph: target,
-                        model.seq_len_ph: sl,
-                        model.lr: lr,
-                        # model.noclk_mid_batch_ph: noclk_mids,
-                        # model.noclk_cat_batch_ph: noclk_cats,
-                        })
+                loss, acc, aux_loss = model.train(sess, [uids, mids, cats, mid_his, cat_his, mid_mask, target, sl, lr, noclk_mids, noclk_cats])
                 end_time = time.time()
                 # print("training time of one batch: %.3f" % (end_time - start_time))
                 approximate_accelerator_time += end_time - start_time
@@ -287,16 +207,16 @@ def train(
                 train_size += batch_size
                 sys.stdout.flush()
                 if (iter % test_iter) == 0:
-                    print("train_size: %d" % train_size)
-                    print("approximate_accelerator_time: %.3f" % approximate_accelerator_time)
-                    print('iter: %d ----> train_loss: %.4f ---- train_accuracy: %.4f ---- tran_aux_loss: %.4f' %
-                          (iter, loss_sum / test_iter, accuracy_sum / test_iter, aux_loss_sum / test_iter))
-                    # print('                                                                                          test_auc: %.4f ----test_loss: %.4f ---- test_accuracy: %.4f ---- test_aux_loss: %.4f ---- eval_time: %.3f ---- num_iters: %d' % eval(sess, test_data, model, best_model_path))
+                    # print("train_size: %d" % train_size)
+                    # print("approximate_accelerator_time: %.3f" % approximate_accelerator_time)
+                    print('iter: %d ----> train_loss: %.4f ---- train_accuracy: %.4f ---- tran_aux_loss: %.4f' % \
+                                          (iter, loss_sum / test_iter, accuracy_sum / test_iter, aux_loss_sum / test_iter))
+                    print('                                                                                          test_auc: %.4f ----test_loss: %.4f ---- test_accuracy: %.4f ---- test_aux_loss: %.4f ---- eval_time: %.3f ---- num_iters: %d' % eval(sess, test_data, model, best_model_path))
                     loss_sum = 0.0
                     accuracy_sum = 0.0
                     aux_loss_sum = 0.0
                 if (iter % save_iter) == 0:
-                    print('save model iter: %d' % (iter))
+                    print('save model iter: %d' %(iter))
                     model.save(sess, model_path+"--"+str(iter))
                 if train_size >= TOTAL_TRAIN_SIZE:
                     break
@@ -308,7 +228,6 @@ def train(
         print("Approximate accelerator time in seconds is %.3f" % approximate_accelerator_time)
         print("Approximate accelerator performance in recommendations/second is %.3f" % (float(TOTAL_TRAIN_SIZE)/float(approximate_accelerator_time)))
 
-
 def test(
         train_file = "local_train_splitByUser",
         test_file = "local_test_splitByUser",
@@ -319,7 +238,7 @@ def test(
         maxlen = 100,
         model_type = 'DNN',
         data_type = 'FP32',
-        seed = 2
+	    seed = 2
 ):
     print("batch_size: ", batch_size)
     print("model: ", model_type)
@@ -356,11 +275,11 @@ def test(
             model.restore(sess, model_path)
         if data_type == 'FP16':
             fp32_variables = [var_name for var_name, _ in tf.contrib.framework.list_variables(model_path)]
-            # print("fp32_variables: ", fp32_variables)
+            #print("fp32_variables: ", fp32_variables)
             sess.run(tf.global_variables_initializer())
             sess.run(tf.local_variables_initializer())
             for variable in tf.global_variables():
-                # print("variable: ", variable)
+                #print("variable: ", variable)
                 if variable.op.name in fp32_variables:
                     var = tf.contrib.framework.load_variable(model_path, variable.op.name)
                     # print("var: ", var)
@@ -403,7 +322,7 @@ if __name__ == '__main__':
     numpy.random.seed(SEED)
     random.seed(SEED)
     if args.mode == 'train':
-        train(model_type=args.model, seed=SEED, maxlen=args.maxlen, batch_size=args.batch_size, data_type=args.data_type)
+        train(model_type=args.model, seed=SEED, batch_size=args.batch_size, data_type=args.data_type)
     elif args.mode == 'test':
         test(model_type=args.model, seed=SEED, batch_size=args.batch_size, data_type=args.data_type)
     else:

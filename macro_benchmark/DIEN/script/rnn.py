@@ -38,13 +38,15 @@ from tensorflow.python.ops import rnn_cell_impl
 from tensorflow.python.ops import tensor_array_ops
 from tensorflow.python.ops import variable_scope as vs
 from tensorflow.python.util import nest
-
+import tensorflow as tf
+from constants import BS
+from constants import SL
+from constants import MAX_ITERS
 
 # pylint: disable=protected-access
 _concat = rnn_cell_impl._concat
 assert_like_rnncell = rnn_cell_impl.assert_like_rnncell
 # pylint: enable=protected-access
-
 
 def _transpose_batch_time(x):
   """Transpose the batch and time dimensions of a Tensor.
@@ -742,10 +744,14 @@ def _dynamic_rnn_loop(cell,
     # Restore some shape information
     for input_, shape in zip(input_t, inputs_got_shape):
       input_.set_shape(shape[1:])
-
     input_t = nest.pack_sequence_as(structure=inputs, flat_sequence=input_t)
+
     if att_scores is not None:
-        att_score = att_scores[:, time, :]
+        #att_score = att_scores[:, time, :]
+        att_score = tf.gather_nd(
+                att_scores,
+                list(zip(range(BS), [time] * BS))
+                )
         call_cell = lambda: cell(input_t, state, att_score)
     else:
         call_cell = lambda: cell(input_t, state)
@@ -780,6 +786,7 @@ def _dynamic_rnn_loop(cell,
           body=_time_step,
           loop_vars=(time, output_ta, state, att_scores),
           parallel_iterations=parallel_iterations,
+          maximum_iterations=100,
           swap_memory=swap_memory)
   else:
       _, output_final_ta, final_state = control_flow_ops.while_loop(
@@ -787,6 +794,7 @@ def _dynamic_rnn_loop(cell,
           body=_time_step,
           loop_vars=(time, output_ta, state),
           parallel_iterations=parallel_iterations,
+          maximum_iterations=100,
           swap_memory=swap_memory)
 
   # Unpack final output if not using output tuples.
